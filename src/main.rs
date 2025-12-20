@@ -6,7 +6,10 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+const REFRESH_INTERVAL_SEC: u64 = 1;
+
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     url: String,
     /** Interrupt when success */
@@ -68,7 +71,7 @@ impl Progress {
         if SystemTime::now()
             .duration_since(self.time_interval.1)?
             .as_secs()
-            >= 1
+            >= REFRESH_INTERVAL_SEC
         {
             self.time_interval.0 = self.time_interval.1;
             self.count_interval.0 = self.count_interval.1;
@@ -82,7 +85,7 @@ impl Progress {
 
 struct RequestJob {
     url: String,
-    t: Arc<Mutex<Progress>>,
+    progress: Arc<Mutex<Progress>>,
     interrupt: bool,
     times: Option<usize>,
 }
@@ -90,7 +93,7 @@ struct RequestJob {
 impl RequestJob {
     async fn start_request(self) -> anyhow::Result<()> {
         loop {
-            self.t.lock().await.refresh(self.times).await?;
+            self.progress.lock().await.refresh(self.times).await?;
 
             let response = reqwest::get(&self.url).await;
 
@@ -98,8 +101,7 @@ impl RequestJob {
                 break;
             }
 
-            let mut t = self.t.lock().await;
-            t.count += 1;
+            let t = self.progress.lock().await;
             if let Some(times) = self.times
                 && t.count == times
             {
@@ -114,12 +116,12 @@ impl RequestJob {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let t = Arc::new(Mutex::new(Progress::new()));
+    let progress = Arc::new(Mutex::new(Progress::new()));
     let mut tasks = Vec::new();
     for _ in 0..args.jobs {
         let job = RequestJob {
             url: args.url.clone(),
-            t: Arc::clone(&t),
+            progress: Arc::clone(&progress),
             interrupt: args.interrupt,
             times: args.times,
         };
