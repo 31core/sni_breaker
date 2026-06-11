@@ -1,10 +1,9 @@
 use clap::Parser;
 use std::{
-    io::Write,
     sync::Arc,
     time::{SystemTime, SystemTimeError},
 };
-use tokio::sync::Mutex;
+use tokio::{io::AsyncWriteExt, sync::Mutex};
 
 const REFRESH_INTERVAL_SEC: u64 = 1;
 
@@ -21,6 +20,9 @@ struct Args {
     /** Request jobs */
     #[arg(short = 'j', long, default_value_t = 1)]
     jobs: usize,
+    /** Save to file */
+    #[arg(short, long)]
+    save: bool,
 }
 
 #[inline(always)]
@@ -67,7 +69,8 @@ impl Progress {
                 )?
             );
         }
-        std::io::stdout().flush()?;
+
+        tokio::io::stdout().flush().await?;
         if SystemTime::now()
             .duration_since(self.time_interval.1)?
             .as_secs()
@@ -91,14 +94,19 @@ struct RequestJob {
 }
 
 impl RequestJob {
-    async fn start_request(self) -> anyhow::Result<()> {
+    async fn start_request(self, seq: usize, save: bool) -> anyhow::Result<()> {
         loop {
             self.progress.lock().await.refresh(self.times).await?;
 
             let response = reqwest::get(&self.url).await;
 
-            if response.is_ok() && self.interrupt {
-                break;
+            if let Ok(res) = response {
+                if save {
+                    tokio::fs::write(format!("{}.html", seq), res.bytes().await?).await?;
+                }
+                if self.interrupt {
+                    break;
+                }
             }
 
             let t = self.progress.lock().await;
@@ -118,14 +126,14 @@ async fn main() -> anyhow::Result<()> {
 
     let progress = Arc::new(Mutex::new(Progress::new()));
     let mut tasks = Vec::new();
-    for _ in 0..args.jobs {
+    for seq in 0..args.jobs {
         let job = RequestJob {
             url: args.url.clone(),
             progress: Arc::clone(&progress),
             interrupt: args.interrupt,
             times: args.times,
         };
-        tasks.push(job.start_request());
+        tasks.push(job.start_request(seq, args.save));
     }
     futures::future::join_all(tasks).await;
     println!();
